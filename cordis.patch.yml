@@ -1,0 +1,24 @@
+# 蓝色大肥鱼桌宠（dsh-fish-pet）bundle 层。
+#
+# 素材分两处：
+#   res/             素材库：桌宠压缩包（.7z / .zip）丢这里
+#   assets/<桌宠>/    运行时目录：生成脚本从 res/ 解压出来，Host 半边递归提供给浏览器
+#
+# 「解压 + 生成客户端数据」是**构建步骤**，由
+#   node tools/build-client.mjs
+# 完成（--force 强制重解、--strict 名字对不上就失败）。重启 dsh 本身不会构建 ——
+# 除非把下面的 buildOnStart 设为 true：那样 Host 启动时若发现 assets/ 是空的，
+# 会在后台自动跑一次生成脚本（不阻塞启动）。
+- insert:
+    - id: fish-pet
+      name: dsh-fish-pet
+      config:
+        # 素材目录。留空 = 默认 <包>/assets，并且递归查找（多宠物切换的正常状态）。
+        # assetDir: '...'
+        # 素材库目录，默认 <包>/res；一般不用改
+        # resDir: '...'
+        routePrefix: /fish-pet
+        # 浏览器缓存秒数（图片内容不变，所以给得比较长）
+        cacheSeconds: 604800
+        # assets/ 空的时候自动构建一次（后台执行；失败只记日志，不影响 dsh 启动）
+        buildOnStart: true

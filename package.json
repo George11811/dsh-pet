@@ -1,0 +1,25 @@
+{
+  "name": "dsh-fish-pet",
+  "version": "1.0.0",
+  "private": true,
+  "description": "蓝色大肥鱼桌宠：悬浮在 Harness Web 界面上的可拖动桌宠，素材取自定义表情包文件夹里的 GIF。",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./lib/client.js",
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-layout"
+      ]
+    }
+  }
+}

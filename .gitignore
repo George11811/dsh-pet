@@ -1,0 +1,27 @@
+# ── 构建产物：不是源文件，跑 node tools/build-client.mjs 就能重建 ──────────
+#
+# assets/：从 res/ 里的压缩包解压出来的运行时素材（本仓库里约 890 MB）。
+#          忽略它 = 忽略"解压结果"；res/ 里的包才是源。
+#          重建方式：node tools/build-client.mjs
+#          （config.buildOnStart = true 时，Host 启动发现 assets/ 为空也会自动重建）
+/assets/
+
+# lib/client.js **不要**忽略：它是客户端半边的实际入口（package.json 的 exports["./client"]），
+# 忽略掉的话全新克隆上来客户端模块加载失败。隔壁 refs-shelf 和 dsh 自带的包也一样提交 lib/。
+# 代价是每次重建都会产生一坨生成出来的 JSON diff，这是刻意的取舍。
+# /lib/client.js
+
+# ── 素材库 res/ ────────────────────────────────────────────────────────────
+#
+# 桌宠压缩包是**大二进制**：fat-fish.7z 有 428 MB，远超 GitHub 单文件 100 MB 上限，
+# 所以忽略 —— 仓库只版本化代码，素材包自己另存一份（本地/网盘）。
+# 确实想连素材一起版本化的话，取消下面这行，并且远端改用 Git LFS。
+/res/
+
+# ── 杂项 ──────────────────────────────────────────────────────────────────
+node_modules/
+*.log
+Thumbs.db
+.DS_Store
+# 手动解压/实验时的临时目录
+.demo-stage/
