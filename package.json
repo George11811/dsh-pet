@@ -5,13 +5,17 @@
   "description": "蓝色大肥鱼桌宠：悬浮在 Harness Web 界面上的可拖动桌宠，素材取自定义表情包文件夹里的 GIF。",
   "type": "module",
   "main": "lib/index.js",
+  "scripts": {
+    "build": "node tools/build-client.mjs",
+    "test": "node tools/self-test.mjs && node tools/client-smoke.mjs"
+  },
   "exports": {
     ".": "./lib/index.js",
     "./client": "./lib/client.js",
+    "./catalog": "./lib/catalog.mjs",
     "./package.json": "./package.json"
   },
-  "dsh": {
-    "bundle": {
+  "dsh": {    "bundle": {
       "patch": "./cordis.patch.yml"
     },
     "client": {

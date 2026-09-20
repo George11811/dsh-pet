@@ -12,7 +12,7 @@
 | --- | --- | --- |
 | `attention` | 有会话在等你回答（审批/提问） | 期待、招手、摇铃、问号、紧张 |
 | `running` | 有会话正在干活 | **开工锁一个动作**：先「思考」，6 秒后切一次到「干活」，然后整个任务都用同一个动作，不再换（`THINK_LEAD_MS = 0` 就是一个动作到底）；同时气泡常驻一行 `● 干活中 12s` 的状态条 |
-| `done` | 有后台[build-client.mjs](tools/build-client.mjs)会话刚干完、还没看过 | 举着通知/红包/礼物提醒一阵子（25 秒后回去过日子） |
+| `done` | 有后台会话刚干完、还没看过 | 举着通知/红包/礼物提醒一阵子（25 秒后回去过日子） |
 | `idle` | 什么都没发生 | 过「生活」，见下表 |
 
 宠物自己的状态优先级更高：
@@ -26,7 +26,8 @@
 
 两个状态都只有一次「抽签」，之后不换动作 —— 拖动和放下各是一个动作，不是一个轮播。
 
-`idle` 时它在几种「生活」之间切换，每段持续几十秒到几分钟，池子见 `tools/build-client.mjs`：
+`idle` 时它在几种「生活」之间切换，每段持续几十秒到几分钟，池子的名字表见
+[lib/catalog.mjs](lib/catalog.mjs) 的 `POOLS`（Host 和构建脚本共用同一份）：
 
 | 生活 | 内容 |
 | --- | --- |
@@ -102,8 +103,10 @@
 | 单击 | 卖萌（害羞、比心、舔舔、点赞…），几秒后回到当前状态；**永远优先响应** —— 即使固定了某个动画、或刚被放下，也会先卖萌再回到本该播的动作 |
 | 双击 / 右键 | 打开面板 |
 | 面板 | 开在鱼**上方**（上方空间不够就开到下方），按那一侧的空间限高（最高 540px），所以永远不会盖住鱼、也不会顶出屏幕；动画列表固定 24px 行高、自己滚动 |
-| 面板里的「桌宠」一行 | 多只桌宠时的切换按钮（点一下就换，纯前端、立即生效，选中项记在 localStorage） |
-| 面板标题栏的 `i` | 展开/收起诊断行：`诊断：槽 props · 会话78 · 干活0 · 等待0 · 未读0 · 动画157` |
+| 面板里的「换一只」一行 | **常驻的一行**：左边是宠物按钮（有几只显示几只，点一下就换，立即生效、记在 localStorage），右边是 `⟳ 重扫` 和 `导入 压缩包`；下面一行写着「花名册：运行时 / 构建时」 |
+| 面板里的 `⟳ 重扫` | 让 Host 重新扫一遍 `assets/`：往 `assets/` 里丢一个目录（或改名/删掉一只）后点它就能看到，**不用构建、不用重启** |
+| 面板里的「导入 压缩包」 | 把 `res/` 里的压缩包解压成新桌宠，**不用敲命令行**；括号里的数字是还没导入的包数；全部导入过之后会多出一个「强制重解压」 |
+| 面板标题栏的 `i` | 展开/收起诊断行：`诊断：槽 props · 会话78 · 干活0 · 等待0 · 未读0 · 宠物fat-fish(157) · 花名册运行时/ok · 压缩包1(-0)…` |
 | 气泡 | 她说话的地方；点一下＝再说一句；干活/等你回答时顶部有常驻状态条 |
 | 面板第二行 | 实时显示 `DSH：正在干活 · 宠物：睡觉`，用来确认状态机真的跟着 DSH 走 |
 | 面板里点某个动画 | 固定播放该动作（点「恢复自动」回到状态机） |
@@ -124,24 +127,43 @@ dsh-fish-pet/
 ├── res/                        # ← 素材库：桌宠压缩包丢这里（.7z / .zip / .rar / .tar*）
 │   └── fat-fish.7z
 ├── assets/                     # ← 运行时素材：每个包解出一个同名目录＝一只桌宠
-│   └── fat-fish/               #   157 个 GIF（拍平后，稳定是 assets/<宠物>/*.gif）
+│   ├── fat-fish/               #   157 个 GIF（拍平后，稳定是 assets/<宠物>/*.gif）
+│   └── .fish-pet-loops.json    #   一轮时长缓存（GIF 时长要读整个文件才算得出，缓存后重扫几十毫秒）
 ├── package.json                # bundle 声明：dsh.bundle.patch + dsh.client
 ├── cordis.patch.yml            # 插入 fish-pet 行 + assetDir 配置
 ├── lib/
-│   ├── index.js                # Host 半边：/fish-pet/<文件名> 路由，递归提供素材
+│   ├── index.js                # Host 半边：素材路由 + 运行时花名册 / 导入接口
+│   ├── catalog.mjs             # 花名册逻辑（扫描 / 命名 / 分池 / 解压）—— Host 与构建脚本共用
 │   └── client.js               # 生成物：浏览器实际加载的 Client 半边（别手改）
 ├── src/client.template.js      # Client 半边的源码（改这个）
 └── tools/
-    ├── build-client.mjs        # res/ → 解压 → assets/ → 扫描 → 分池 → 生成 lib/client.js
-    └── self-test.mjs           # Host 半边自测（不用启动 dsh）
+    ├── build-client.mjs        # res/ → 解压 → assets/ → 扫描 → 分池 → 生成 lib/client.js（离线兜底）
+    ├── self-test.mjs           # Host 半边自测（不用启动 dsh）
+    └── client-smoke.mjs        # Client 半边冒烟测试（最小 React 替身，能模拟点击换宠物）
 ```
 
-## 初始化 / 加宠物：一条命令
+## 加 / 换宠物：三条路
+
+**页面上点就行（推荐）**：
+
+| 想要的效果 | 怎么做 |
+| --- | --- |
+| 加一只新桌宠 | 把压缩包（`.7z/.zip/.rar/.tar*`）丢进 `res/` → 打开面板点 **「导入 压缩包 (1)」** → 自动切到新宠物 |
+| 让一只新宠物出现（素材已经是目录） | 把目录放进 `assets/`（或直接改 `assets/` 里的东西）→ 面板点 **`⟳ 重扫`** |
+| 换宠物 | 面板里点「换一只」那一行的按钮，立即生效 |
+| 重新解压某只宠物 | 点 **「强制重解压」**（忽略时间戳，把 `res/` 里所有包重解一遍） |
+
+原理：宠物/动画/池子不再写死在客户端里，而是 Host 半边**每次被问到时按需扫描**
+`assets/`（`GET /fish-pet/__roster`），面板的「导入」就是让 Host 解压
+`res/`（`POST /fish-pet/__import`）。两边用的是同一份逻辑（`lib/catalog.mjs`），
+所以运行时看到的数据和构建出来的数据永远一致。
+
+**命令行（可选，仍然是离线兜底）**：
 
 ```powershell
-node tools/build-client.mjs                    # res/ → assets/，再生成 lib/client.js
+node tools/build-client.mjs                    # res/ → assets/，并把数据写进 lib/client.js
 node tools/build-client.mjs --force            # 压缩包没变也重新解压
-node tools/build-client.mjs --strict           # POOLS 名字对不上就当失败
+node tools/build-client.mjs --strict           # 池子名字对不上就当失败
 node tools/build-client.mjs --res <目录> --assets <目录>
 ```
 
@@ -153,34 +175,34 @@ node tools/build-client.mjs --res <目录> --assets <目录>
    `assets/<宠物>/*.gif` —— 宠物多了也不会各长一个样。
 3. **扫描**：`assets/` 下**每个顶层目录 = 一只桌宠**，递归找它的 GIF；解析帧延时算一轮时长；
    显示名 = 去掉「该宠物所有文件名的公共前缀（通常是宠物名）+ 导出时间戳」。
-4. **分池 + 生成**：按显示名把动画分进状态机的池子（每只宠物一套）。名字对不上的宠物，
-   脚本会把没人认领的动画**轮流填进空池子**（保证每个状态都有动作），并打印警告；
+4. **分池 + 生成**：按显示名把动画分进状态机的池子（每只宠物一套）。一个池子一个名字都没对上的
+   宠物，脚本会把没人认领的动画**轮流填进空池子**（保证每个状态都有动作），并打印警告；
    加 `--strict` 才把警告当失败。最后写出 `lib/client.js`。
 
-### 换 / 加一只桌宠（运行时切换）
+**为什么还要构建？** `lib/client.js` 里那份数据是**离线兜底**：Host 半边没响应
+（比如没重启、接口被挡）时，宠物照样能渲染、能切换。不做这一步也能用，
+只是页面上的「重扫 / 导入」按钮才是指望得上的那条路。
 
-1. 把新包丢进 `res/`；
-2. `node tools/build-client.mjs`；
-3. 刷新页面（Ctrl+R）；
-4. 面板里出现「桌宠」一行按钮，点一下就换 —— **纯前端切换，不用重新生成、不用重启**。
-   选中的宠物记在 localStorage，刷新后还在。
+> 想试切换但手头只有一个包？随便复制一张 GIF 到 `assets/demo/`，点「重扫」就多了一只
+> `demo` 桌宠（只有一张图，所有状态都会退化成那一张）。
 
 多只宠物会一起被提供（`assets/<宠物>/` 各自独立），客户端只显示当前选中的那只。
-同名的 GIF 之间互不影响（宠物目录不同）。
+同名的 GIF 之间互不影响（宠物目录不同，URL 带宠物目录）。
 
 ### 重启 dsh 会不会自动初始化？
 
-**默认不会。** 解压 `res/` → 扫描 → 重新生成 `lib/client.js` 是**构建步骤**，只有
-`node tools/build-client.mjs` 会做；重启 dsh 只是重新加载插件。所以删掉 `assets/` 里的东西
-之后重启，得到的就是「没有素材」的状态。为此加了两道防线：
+**素材扫描是运行时做的**（重启后 Host 会重新扫 `assets/`），但**解压 `res/` 里的压缩包**
+仍然只有一个触发点：面板上的「导入」，或命令行的构建脚本。两道防线保证你不会
+对着一只空宠物发呆：
 
 | 场景 | 表现 |
 | --- | --- |
-| `assets/` 空、`res/` 有压缩包 | Host 启动时记一条**明确警告**（含该跑的命令），健康检查里 `needsBuild: true`、`resArchives: N` |
+| `assets/` 空、`res/` 有压缩包 | Host 启动时记一条**明确警告**（含该做的事），健康检查里 `needsBuild: true`、`resArchives: N`；页面上直接显示一张卡片，**上面就有「导入」和「重扫」按钮** |
 | 想让启动自动补上 | 把 `config.buildOnStart` 设为 `true`：启动发现 `assets/` 空就**后台**跑一次生成脚本（不阻塞启动，失败只记日志） |
-| `assets/` 和 `res/` 都空 | 警告提示把桌宠包放进 `res/` |
-| 生成数据还在但 GIF 取不到（素材被删/assetDir 指错） | 客户端连续 3 次加载失败后，在气泡位置显示「桌宠素材加载失败 —— 先跑 node tools/build-client.mjs」，可关闭 |
-| 生成数据里一个动画都没有 | 直接显示「没有桌宠素材 —— 先跑 node tools/build-client.mjs」，不渲染坏掉的宠物 |
+| `assets/` 和 `res/` 都空 | 页面卡片提示把桌宠包放进 `res/` 再点「导入」 |
+| 生成数据还在但 GIF 取不到（素材被删/assetDir 指错） | 客户端连续 3 次加载失败后，在气泡位置显示一条提示，**带「重扫 / 导入」按钮**，可关闭 |
+| 生成数据里一个动画都没有 | 显示同一张自救卡片（不渲染坏掉的宠物、也不留一只裂图的鱼） |
+| 面板里选的宠物没了（删了目录/换了包） | 花名册刷新后自动退回第一只，不会卡在一只不存在的宠物上 |
 
 ## 为什么要有 Host 半边
 
@@ -188,25 +210,43 @@ node tools/build-client.mjs --res <目录> --assets <目录>
 所以 Host 半边在素材目录上挂一条 HTTP 前缀路由：
 
 ```
-GET /fish-pet/<文件名>       → image/gif（带 ETag / 长缓存）
-GET /fish-pet/<相对路径>      → 同上，路径式访问也行
-GET /fish-pet/               → {"ok":true,"version":2,"animations":157,...}  健康检查
+GET  /fish-pet/<文件名>        → image/gif（带 ETag / 长缓存）
+GET  /fish-pet/<相对路径>       → 同上，路径式访问也行
+GET  /fish-pet/                → {"ok":true,"version":3,"animations":172,...}  健康检查
+GET  /fish-pet/__roster        → 运行时花名册：pets + assets + pools + res/ 状态
+POST /fish-pet/__import        → 把 res/ 里的压缩包解压成新宠物，返回新花名册
 ```
 
 解析顺序：先按**相对路径**直接命中，再按**文件名**在整棵素材树里找。因此客户端生成的
-URL 只用文件名 —— 素材换宠物目录、换压缩包重新解压，已生成的 URL 都不用变。
+URL 只用带宠物目录的相对路径 —— 素材换宠物目录、换压缩包重新解压，已生成的 URL 都不用变。
 安全性：非 `.gif`、含 `..`／分隔符／控制字符的名字一律 404，解析结果必须落在素材目录内。
+
+`__import` 是唯一会写文件的接口，所以挡得比较死：**请求体只能是一个 `force` 布尔值**，
+目标路径完全由压缩包自己的文件名决定（不存在任何「目标路径」参数，想往任意位置写都做不到）；
+还要求带 `x-fish-pet` 请求头（跨站请求发不出去，会先撞 CORS 预检）、`Origin` 必须同源，
+同一时刻只跑一次解压。
 
 改完 Host 代码可以先跑自测，不用启动 dsh：
 
 ```powershell
-node tools/self-test.mjs      # 11 项：递归查找、相对路径、穿越防护、ETag/304、HEAD、健康检查…
+npm test                      # 下面两个一起跑
+node tools/self-test.mjs      # 32 项：递归查找、穿越防护、ETag/304、HEAD、健康检查、
+                              #        __roster 结构、__import 挡板、真实解压+分池+重复导入
+node tools/client-smoke.mjs   # 18 项：用最小 React 替身渲染客户端，模拟「双击开面板 →
+                              #        点另一只宠物 / 点重扫 / 点导入」，断言 <img> 真的换了、
+                              #        英文词典没漏 key、空素材时给自救卡片
 ```
+
+`client-smoke.mjs` 是给「客户端改动只能靠刷新页面看」这件事准备的：它不开浏览器，
+用一套最小 React 替身（按调用序号存 hooks）把 `FishPet` 渲染出来，再调用元素的
+`onClick` / `onDoubleClick` 模拟点击、用假 `fetch` 喂一份花名册 / 导入结果，
+所以「面板里点了没反应」「导入后没接上新宠物」这类问题在命令行就能发现。
 
 ## 改交互
 
 池子的**语义**（优先级、停留时长、生活持续多久、说什么）在 `src/client.template.js` 的
-`ACTIVITIES` / `RATE_PRESETS` / `POOLS` 用法 / `plan()` 里；改完重新跑生成脚本 + 刷新页面。
+`ACTIVITIES` / `RATE_PRESETS` / `plan()` 里；池子的**名字表**在 `lib/catalog.mjs` 的
+`POOLS` 里（Host 和构建脚本共用）。改完重新跑生成脚本 + 刷新页面。
 
 ## 配置
 
@@ -224,26 +264,33 @@ node tools/self-test.mjs      # 11 项：递归查找、相对路径、穿越防
 | --- | --- |
 | `lib/client.js` / `src/client.template.js` | **刷新页面**（Ctrl+R） |
 | `cordis.patch.yml` 的 `config` | **热生效**（开关一次 bundle 即可，实测有效） |
-| `lib/index.js`（Host 半边代码） | **需要重启 dsh**：已加载的 JS 模块代不会因为改文件或开关插件而重新 import |
-| `tools/build-client.mjs` / `self-test.mjs` | 下次运行即生效 |
+| `lib/index.js` / `lib/catalog.mjs`（Host 半边代码） | **需要重启 dsh**：已加载的 JS 模块不会因为改文件、甚至开关一次 bundle 而重新 import（实测：开关 bundle 后接口仍是旧版） |
+| `tools/*.mjs` | 下次运行即生效 |
+| **加 / 换宠物**（`res/` 或 `assets/` 里的素材） | 面板点「导入 / 重扫」即可，**不用重启、不用重新构建**（Host 代码本身已经是新版时） |
 
 ## 诊断与排错
 
 `GET /fish-pet/` 返回 `{ ok, version, route, assetRoot, recursive, animations, needsBuild,
-resArchives, buildOnStart, pets, stats }`：
+resArchives, pendingImports, buildOnStart, pets, roster, cacheSeconds, stats }`：
 
-- `version: 2` + `recursive: true` → 新的 Host 代码已生效（递归查找、多宠物）
-- `animations` → 整棵素材树的 GIF 数；为 0 且 `needsBuild: true` 就是缺素材，跑生成脚本
-- `pets` → 认出来的宠物目录名
+- `version: 3` → 新的 Host 代码已生效（递归查找、运行时花名册、面板导入；`2` 就是还没重启 dsh）
+- `animations` → 整棵素材树的 GIF 数；为 0 且 `needsBuild: true` 就是缺素材
+- `pets` → 认出来的宠物目录名；`pendingImports` → `res/` 里还没导入的压缩包
+- `roster.scanMs` → 上次扫描耗时（有 `.fish-pet-loops.json` 缓存后通常几十毫秒）
 - `stats.browserHits` → 浏览器侧取图次数，能确认桌宠真的在页面上取图
 
-`node tools/self-test.mjs` 可以在不启动 dsh 的情况下验证 Host 半边的路由行为。
+`GET /fish-pet/__roster` 就是浏览器拿的那份数据（宠物、动画、池子、`res/` 状态），
+排查「面板里为什么没有某只宠物」看它最快。
+
+`npm test` 可以在不启动 dsh 的情况下验证两半边（Host 路由 + 客户端渲染/切换）。
 
 - **`node tools/build-client.mjs` 报「解压失败」**：装个 7-Zip（`7z.exe`）最省事。
-- **素材换了但页面没变**：先跑生成脚本，再 **Ctrl+R**（浏览器缓存了 `lib/client.js`）。
+- **面板里点「导入」报 404 或「拉花名册失败」**：Host 半边还是旧代码 —— **重启 dsh**
+  （判断依据：`GET /fish-pet/` 的 `version` 还是 2）。
+- **素材换了但页面没变**：面板点「重扫」；`lib/client.js` 那份兜底数据要变才需要跑生成脚本 + Ctrl+R。
+- **面板里没有某只宠物**：看 `GET /fish-pet/__roster` 的 `pets`。没有它 → 目录不在 `assets/` 下、
+  或者目录里没有 GIF（`assets/` 下的 `.` / `__` 开头目录会被忽略）。
 - **桌宠图片 404**：看 `GET /fish-pet/` 的 `animations`；为 0 就是 `assetDir` 指错了目录。
-- **加了宠物但面板没有切换按钮**：面板里的「桌宠」一行只在宠物数 > 1 时出现，先确认
-  `assets/` 下确实多了目录、并且重新跑过生成脚本。
 
 ## Git：什么提交、什么忽略
 
@@ -251,13 +298,15 @@ resArchives, buildOnStart, pets, stats }`：
 
 | 路径 | 提交？ | 理由 |
 | --- | --- | --- |
-| `src/` `lib/index.js` `tools/` `package.json` `cordis.patch.yml` `README.md` | ✅ | 源码与配置 |
+| `src/` `lib/index.js` `lib/catalog.mjs` `tools/` `package.json` `cordis.patch.yml` `README.md` | ✅ | 源码与配置 |
 | `lib/client.js` | ✅ | **是生成物但必须提交**：`package.json` 的 `exports["./client"]` 指向它，忽略掉全新克隆会客户端模块加载失败（隔壁 refs-shelf 和 dsh 自带的包也都提交 `lib/`）。代价是每次重建有一坨生成 JSON 的 diff |
-| `assets/` | ❌ | 构建产物：`res/` 的压缩包解压出来的（本仓库约 890 MB），`node tools/build-client.mjs` 随时重建 |
+| `assets/` | ❌ | 构建产物：`res/` 的压缩包解压出来的（约 930 MB，含 `.fish-pet-loops.json` 缓存），面板「导入」或 `node tools/build-client.mjs` 随时重建 |
 | `res/` | ⚠️ 默认提交 | 它是**源素材**，但单个包可能很大（`fat-fish.7z` 428 MB），而 GitHub 单文件上限 100 MB —— 要推远端就取消 `.gitignore` 里 `/res/` 那行（或改用 Git LFS） |
 
-全新克隆后的流程：把桌宠包放进 `res/` → `node tools/build-client.mjs`（或让
-`config.buildOnStart: true` 在 dsh 启动时自动做）→ 刷新页面。
+全新克隆后的流程（两种都行）：
+
+- 面板派：把桌宠包放进 `res/` → 刷新页面 → 面板点「导入」；
+- 命令派：`node tools/build-client.mjs`（或让 `config.buildOnStart: true` 在 dsh 启动时自动做）。
 
 `.gitattributes` 里把 `*.7z/*.zip/*.gif…` 标成 binary、文本统一 LF，并把
 `lib/client.js` 标成 `linguist-generated`（diff/语言统计里不显示）。

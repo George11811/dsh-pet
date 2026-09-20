@@ -1,9 +1,13 @@
 /**
  * 蓝色大肥鱼桌宠 —— Client 半边。
  *
- * 这是模板：`const ASSETS = …` / `const POOLS = …` / `const BASE = …` 三行由
- * tools/build-client.mjs 用素材目录的真实内容重写，产物是 lib/client.js
- * （浏览器实际加载的文件）。改交互改这里，然后重新构建。
+ * 这是模板：`const BUILT_PETS = …` / `const BUILT_ASSETS = …` / `const BUILT_POOLS = …` /
+ * `const BASE = …` 四行由 tools/build-client.mjs 用素材目录的真实内容重写，产物是
+ * lib/client.js（浏览器实际加载的文件）。改交互改这里，然后重新构建。
+ *
+ * 这四行只是**兜底数据**：组件挂载后会向 Host 要一份运行时花名册
+ * （GET BASE/__roster），拿到就整体替换 —— 所以加新宠物不必重新构建，
+ * 在面板里点「导入 / 重扫」即可（Host 和构建脚本共用 lib/catalog.mjs 的扫描逻辑）。
  *
  * 素材靠 Host 半边的 HTTP 路由提供，这里只拼 URL，不搬字节。
  *
@@ -29,12 +33,12 @@ window.__ModuleLoader__.load({
     const React = require('react')
     const h = React.createElement
 
-    /** 每只宠物：{ id, label, count } —— 运行时切换用 */
-    const PETS = /* @__PETS__@ */ []
-    /** 每个动画：{ f: 相对路径, u: URL 片段, n: 显示名, ms: 一轮时长, pet: 属于哪只宠物 } */
-    const ASSETS = /* @__ANIMATIONS__@ */ []
-    /** 每只宠物一套池子：petId → { 池名: [f, ...] } */
-    const POOLS = /* @__POOLS__@ */ {}
+    /** 构建时写进来的花名册（离线兜底）：{ id, label, count } */
+    const BUILT_PETS = /* @__PETS__@ */ []
+    /** 构建时写进来的动画：{ f: 相对路径, u: URL 片段, n: 显示名, ms: 一轮时长, pet: 属于哪只宠物 } */
+    const BUILT_ASSETS = /* @__ANIMATIONS__@ */ []
+    /** 构建时写进来的池子：petId → { 池名: [f, ...] } */
+    const BUILT_POOLS = /* @__POOLS__@ */ {}
     const BASE = /* @__BASE__@ */ '/fish-pet'
     const STORAGE_KEY = 'dsh-fish-pet:v1'
 
@@ -64,6 +68,7 @@ window.__ModuleLoader__.load({
         pin: ['好，我就一直这样', '你说了算', '那我定格了', '喜欢这个是吧，那我一直摆着'],
         show: ['我回来了！想我没', '终于想起我了', '藏这么久都不找我', '重见天日'],
         switchPet: ['换成 {x} 了', '好，现在就由 {x} 值班', '{x} 上线！', '交接完毕：{x}'],
+        imported: ['新伙伴 {x} 到岗了', '收到 {x} 这个新素材包', '解压好了，以后也能变成 {x}'],
         report: ['这次干了 {t}，写了 {o} tokens', '收工：{t} / {o} tokens，累死我了', '报告：耗时 {t}，输出 {o} tokens（总 {a}）', '干完啦，{t}、{o} tokens，值不值？'],
         reportTime: ['这次干了 {t}', '收工，耗时 {t}', '活儿交了，{t} 搞定'],
         // 干活期间的实时播报（按事件流）
@@ -103,6 +108,7 @@ window.__ModuleLoader__.load({
         pin: ['Fine, I will stay like this', 'Your call', 'Frozen then', 'You like this one, so I hold it'],
         show: ['I am back! Missed me?', 'Finally you remembered me', 'So long and you did not look', 'Back to daylight'],
         switchPet: ['Switched to {x}', 'Fine, {x} is on duty now', '{x} is online!', 'Handover done: {x}'],
+        imported: ['New buddy {x} is on duty', 'Got the {x} pack', 'Extracted — {x} can join from now on'],
         report: ['That took {t} and {o} tokens', 'Done: {t} / {o} tokens, I am tired', 'Report: {t}, {o} output tokens ({a} total)', 'All done in {t} for {o} tokens'],
         reportTime: ['That took {t}', 'Done in {t}', 'Wrapped up in {t}'],
         // live play-by-play while working (driven by the session event stream)
@@ -171,22 +177,61 @@ window.__ModuleLoader__.load({
     /** 开工后先播多久「思考」再切到「干活」；0 就是整个任务只用一个动作。 */
     const THINK_LEAD_MS = 6000
 
-    const BY_FILE = new Map(ASSETS.map((asset) => [asset.f, asset]))
-    const PET_IDS = PETS.map((pet) => pet.id)
-    const DEFAULT_PET = PET_IDS.length > 0 ? PET_IDS[0] : ''
+    /**
+     * 花名册：宠物 / 动画 / 池子。
+     *
+     * 默认是构建时写死的那份；组件挂载后会向 Host 要一份最新的（GET BASE/__roster），
+     * 拿到就整体替换 —— 所以「往 assets/ 丢一只新宠物 → 面板里点重扫」或者
+     * 「往 res/ 丢压缩包 → 面板里点导入」都能立刻用，不用重新构建客户端。
+     * Host 半边不可用（没重启、老版本）时静默留在构建时的数据上，功能照旧。
+     */
+    const catalog = { pets: [], assets: [], pools: {}, source: 'built', generatedAt: null, warnings: [], res: null, scanMs: 0 }
+    const BY_FILE = new Map()
     const ASSETS_BY_PET = new Map()
-    for (const asset of ASSETS) {
-      if (!ASSETS_BY_PET.has(asset.pet)) ASSETS_BY_PET.set(asset.pet, [])
-      ASSETS_BY_PET.get(asset.pet).push(asset)
-    }
     const RESOLVED_POOLS = new Map()
+    /** 素材全空时的占位动画：让渲染和状态机有个东西可以用，界面会改成提示卡片。 */
+    const PLACEHOLDER = { f: '', u: '', n: '', ms: 2400, pet: '' }
+
+    /** 用一份花名册整体替换当前数据（同时清掉按宠物缓存的池子）。 */
+    function applyCatalog(next, source) {
+      const data = next && typeof next === 'object' ? next : {}
+      catalog.pets = Array.isArray(data.pets) ? data.pets.filter((pet) => pet && typeof pet.id === 'string') : []
+      catalog.assets = Array.isArray(data.assets)
+        ? data.assets.filter((asset) => asset && typeof asset.f === 'string' && typeof asset.u === 'string')
+        : []
+      catalog.pools = data.pools && typeof data.pools === 'object' ? data.pools : {}
+      catalog.source = source
+      catalog.generatedAt = typeof data.generatedAt === 'string' ? data.generatedAt : null
+      catalog.warnings = Array.isArray(data.warnings) ? data.warnings : []
+      catalog.res = data.res && typeof data.res === 'object' ? data.res : null
+      catalog.scanMs = Number.isFinite(data.scanMs) ? data.scanMs : 0
+
+      BY_FILE.clear()
+      ASSETS_BY_PET.clear()
+      RESOLVED_POOLS.clear()
+      for (const asset of catalog.assets) {
+        if (!BY_FILE.has(asset.f)) BY_FILE.set(asset.f, asset)
+        if (!ASSETS_BY_PET.has(asset.pet)) ASSETS_BY_PET.set(asset.pet, [])
+        ASSETS_BY_PET.get(asset.pet).push(asset)
+      }
+    }
+
+    applyCatalog({ pets: BUILT_PETS, assets: BUILT_ASSETS, pools: BUILT_POOLS }, 'built')
+
+    function petIds() {
+      return catalog.pets.map((pet) => pet.id)
+    }
+
+    function defaultPet() {
+      return catalog.pets.length > 0 ? catalog.pets[0].id : ''
+    }
 
     function petAssets(petId) {
       return ASSETS_BY_PET.get(petId) || []
     }
 
     function petLabel(petId) {
-      const pet = PETS.find((entry) => entry.id === petId)
+      const pet = catalog.pets.find((entry) => entry.id === petId)
       return pet ? pet.label : petId
     }
 
@@ -194,7 +239,7 @@ window.__ModuleLoader__.load({
     function pool(petId, key) {
       const cacheKey = `${petId}|${key}`
       if (RESOLVED_POOLS.has(cacheKey)) return RESOLVED_POOLS.get(cacheKey)
-      const petPools = POOLS[petId] || {}
+      const petPools = catalog.pools[petId] || {}
       const names = petPools[key]
       const list = Array.isArray(names) ? names.map((file) => BY_FILE.get(file)).filter(Boolean) : []
       const result = list.length > 0 ? list : petAssets(petId)
@@ -260,6 +305,22 @@ window.__ModuleLoader__.load({
         sDone: '未读',
         sTokens: 'token',
         sEvents: '事件',
+        rescan: '重扫',
+        rescanTitle: '重新扫描 assets/ 目录（丢进去的新宠物目录立刻出现）',
+        import: '导入',
+        importTitle: '把 res/ 里的压缩包解压成新宠物',
+        importForce: '强制重解压',
+        importForceTitle: '忽略时间戳，把 res/ 里的压缩包全部重新解压一遍',
+        importing: '解压中…',
+        importNone: 'res/ 里没有待导入的压缩包',
+        importFail: '导入失败',
+        roster: '花名册',
+        rosterRuntime: '运行时',
+        rosterBuilt: '构建时',
+        rosterFail: '拉花名册失败（Host 半边可能要重启 dsh）',
+        petHint: '换宠物：直接把桌宠压缩包丢进 res/ 点「导入」，或往 assets/ 放一个目录点「重扫」',
+        noAssetsHint: '把桌宠压缩包（.7z / .zip）丢进 res/，然后点下面的「导入」',
+        archive: '压缩包',
       },
       en: {
         label: 'Blue Fish desktop pet',
@@ -318,6 +379,22 @@ window.__ModuleLoader__.load({
         sDone: 'unread',
         sTokens: 'tokens',
         sEvents: 'events',
+        rescan: 'Rescan',
+        rescanTitle: 'Rescan the assets/ directory (a new pet folder shows up immediately)',
+        import: 'Import',
+        importTitle: 'Extract the archives in res/ as new pets',
+        importForce: 'Force',
+        importForceTitle: 'Ignore timestamps and re-extract every archive in res/',
+        importing: 'Extracting…',
+        importNone: 'nothing new to import in res/',
+        importFail: 'import failed',
+        roster: 'Roster',
+        rosterRuntime: 'runtime',
+        rosterBuilt: 'built-in',
+        rosterFail: 'roster fetch failed (the host half may need a dsh restart)',
+        petHint: 'Switch pets: drop a pack into res/ and hit Import, or drop a folder into assets/ and hit Rescan',
+        noAssetsHint: 'Drop a pet pack (.7z / .zip) into res/ and hit Import below',
+        archive: 'archives',
       },
     }
 
@@ -617,7 +694,7 @@ window.__ModuleLoader__.load({
     }
 
     function loadPrefs() {
-      const base = { ...DEFAULT_PREFS, pet: DEFAULT_PET }
+      const base = { ...DEFAULT_PREFS, pet: defaultPet() }
       try {
         const raw = window.localStorage.getItem(STORAGE_KEY)
         if (!raw) return base
@@ -630,8 +707,8 @@ window.__ModuleLoader__.load({
           hidden: parsed.hidden === true,
           rate: RATE_ORDER.includes(parsed.rate) ? parsed.rate : base.rate,
           talk: parsed.talk !== false,
-          // 素材换过之后旧 id 可能不存在了，退回默认宠物。
-          pet: PET_IDS.includes(parsed.pet) ? parsed.pet : DEFAULT_PET,
+          // 素材换过之后旧 id 可能不存在了，退回默认宠物（花名册到位后还会再校一次）。
+          pet: petIds().includes(parsed.pet) ? parsed.pet : base.pet,
         }
       } catch {
         return base
@@ -653,7 +730,9 @@ window.__ModuleLoader__.load({
     }
 
     function pick(list, avoid) {
-      const poolList = list && list.length > 0 ? list : ASSETS
+      // 素材整个空的时候也要给渲染一个东西用（界面会换成提示卡片）。
+      const poolList = list && list.length > 0 ? list : catalog.assets
+      if (poolList.length === 0) return PLACEHOLDER
       if (poolList.length === 1) return poolList[0]
       for (let attempt = 0; attempt < 8; attempt += 1) {
         const candidate = poolList[Math.floor(Math.random() * poolList.length)]
@@ -741,11 +820,12 @@ window.__ModuleLoader__.load({
 
     function FishPet(props) {
       const t = props.t
-      // 生成出来的数据里一个动画都没有：别渲染一只坏掉的宠物，直接把话说清楚。
-      // （这里必须放在任何 hook 之前，所以只能用 props.t，不能动 state。）
-      if (ASSETS.length === 0) {
-        return h('div', { style: NOTICE_STYLE }, `🐟 ${t('noAssets')} —— ${t('buildHint')}`)
-      }
+      // t 放进 ref：花名册刷新那几个 useCallback 要保持稳定，
+      // 不能因为每次渲染的 t 换了身份就重建（否则挂载时的刷新 effect 会自己转起来）。
+      const tRef = React.useRef(t)
+      tRef.current = t
+      // 诊断用的词典状态（服务没了/没绑上时，面板的 i 行会显出来）。
+      const localeInfo = typeof props.localeInfo === 'function' ? props.localeInfo : () => 'n/a'
 
       const timer = props.timer
       // 两条路都订阅（hook 顺序固定），优先用槽给的标准 props。
@@ -777,6 +857,11 @@ window.__ModuleLoader__.load({
       // 图片连续加载失败（素材被删了、assetDir 指错了）也要说出来，而不是默默显示裂图。
       const [imageFailures, setImageFailures] = React.useState(0)
       const [noticeHidden, setNoticeHidden] = React.useState(false)
+      // 花名册：source 决定「运行时」还是「构建时」，导入/重扫的结果用 note 说一句。
+      const [rosterSeq, setRosterSeq] = React.useState(0)
+      const [rosterState, setRosterState] = React.useState('idle')
+      const [importing, setImporting] = React.useState(false)
+      const [rosterNote, setRosterNote] = React.useState(null)
 
       const prefsRef = React.useRef(prefs)
       const assetRef = React.useRef(asset)
@@ -878,6 +963,131 @@ window.__ModuleLoader__.load({
         const hold = Math.max(1200, bubble.until - Date.now())
         return scheduleOnce(() => setBubble(null), hold)
       }, [bubble, scheduleOnce])
+
+      // ── 花名册：运行时从 Host 拉一份最新的宠物/动画/池子 ────────────────────
+      /** 清掉状态机里的临时状态（换宠物 / 花名册变了之后不能让旧池子的动作留着）。 */
+      const resetMachine = React.useCallback(() => {
+        const machine = machineRef.current
+        machine.pokeUntil = 0
+        machine.celebrateUntil = 0
+        machine.dropUntil = 0
+        machine.holdAsset = null
+        machine.dropAsset = null
+        machine.runAsset = null
+        machine.runPhase = null
+        machine.activity = null
+        machine.activityUntil = 0
+        machine.activitySay = null
+        setPinned(null)
+      }, [])
+
+      /**
+       * 换一只宠物：纯前端切换，立刻换图（不等状态机下一个节拍），用新宠物的池子继续过日子。
+       */
+      const switchPet = React.useCallback(
+        (petId) => {
+          if (petId === prefsRef.current.pet) return
+          if (!petIds().includes(petId)) return
+          resetMachine()
+          update({ pet: petId })
+          const next = pick(pool(petId, 'daze'))
+          if (next.f !== assetRef.current.f) setToken((n) => n + 1)
+          assetRef.current = next
+          setAsset(next)
+          setSignal((n) => n + 1)
+          speak('switchPet', { force: true, vars: { x: petLabel(petId) } })
+        },
+        [resetMachine, speak, update],
+      )
+
+      /**
+       * 拉一次花名册。拿到就整体替换掉构建时写死的数据；失败就静默留在原数据上
+       * （Host 半边没重启时就是这种情况，不该弹一堆错）。
+       */
+      const refreshRoster = React.useCallback(async (options) => {
+        const opts = options || {}
+        setRosterState('loading')
+        try {
+          const response = await fetch(`${BASE}/__roster${opts.force === true ? '?refresh=1' : ''}`, {
+            headers: { accept: 'application/json' },
+            cache: 'no-store',
+          })
+          if (!response.ok) throw new Error(`HTTP ${response.status}`)
+          const data = await response.json()
+          applyCatalog(data, 'runtime')
+          setRosterState('ok')
+          setRosterSeq((n) => n + 1)
+          setRosterNote(null)
+          return data
+        } catch (error) {
+          setRosterState('error')
+          if (opts.loud === true) {
+            setRosterNote(`${tRef.current('rosterFail')}（${error && error.message ? error.message : String(error)}）`)
+          }
+          return null
+        }
+      }, [])
+
+      /** 把 res/ 里的压缩包解压成新宠物（面板上的「导入」）。 */
+      const importFromRes = React.useCallback(
+        async (force) => {
+          setImporting(true)
+          setRosterNote(null)
+          try {
+            const response = await fetch(`${BASE}/__import`, {
+              method: 'POST',
+              headers: { 'content-type': 'application/json', accept: 'application/json', 'x-fish-pet': 'import' },
+              body: JSON.stringify({ force: force === true }),
+            })
+            const data = await response.json().catch(() => null)
+            if (!response.ok) throw new Error(data && data.error ? data.error : `HTTP ${response.status}`)
+            if (data && Array.isArray(data.pets)) {
+              applyCatalog(data, 'runtime')
+              setRosterState('ok')
+              setRosterSeq((n) => n + 1)
+            }
+            const imported = data && Array.isArray(data.imported) ? data.imported : []
+            const failures = data && Array.isArray(data.failures) ? data.failures : []
+            if (imported.length > 0) {
+              const names = imported.map((id) => petLabel(id)).join('、')
+              speak('imported', { force: true, vars: { x: names } })
+              setRosterNote(`${tRef.current('import')}：${names}`)
+              // 只导入了一只就顺手切过去，省掉一次点击。
+              if (imported.length === 1) switchPet(imported[0])
+            } else if (failures.length > 0) {
+              setRosterNote(`${tRef.current('importFail')}：${failures[0].archive} — ${failures[0].reason}`)
+            } else {
+              setRosterNote(tRef.current('importNone'))
+            }
+            return data
+          } catch (error) {
+            setRosterNote(`${tRef.current('importFail')}：${error && error.message ? error.message : String(error)}`)
+            return null
+          } finally {
+            setImporting(false)
+          }
+        },
+        [speak, switchPet],
+      )
+
+      // 挂载后拉一次花名册（Host 半边是权威数据源，构建时那份只是兜底）。
+      React.useEffect(() => {
+        void refreshRoster({})
+      }, [refreshRoster])
+
+      // 花名册换了之后，选中的宠物可能已经不在里面（素材被删/换包）→ 退回第一只。
+      React.useEffect(() => {
+        const ids = petIds()
+        if (ids.length === 0) return
+        if (ids.includes(prefsRef.current.pet)) return
+        resetMachine()
+        const next = pick(pool(ids[0], 'daze'))
+        if (next.f !== assetRef.current.f) setToken((n) => n + 1)
+        assetRef.current = next
+        setAsset(next)
+        update({ pet: ids[0] })
+        setSignal((n) => n + 1)
+      }, [rosterSeq, resetMachine, update])
 
       // ── 干活播报：订阅当前会话的事件流，看她在想什么、调了什么工具、成没成 ──
       const binding = React.useMemo(() => {
@@ -1101,6 +1311,8 @@ window.__ModuleLoader__.load({
       // 状态机主循环：算一步、播一步、排下一步。输入一变就立刻重算。
       React.useEffect(() => {
         if (prefs.hidden) return undefined
+        // 一个动画都没有时不空转（花名册到位/导入成功后会因为 rosterSeq 变化重启）。
+        if (catalog.assets.length === 0) return undefined
         let cancelled = false
         let dispose = null
         const schedule = (fn, ms) => {
@@ -1136,7 +1348,7 @@ window.__ModuleLoader__.load({
           cancelled = true
           if (dispose) dispose()
         }
-      }, [plan, timer, prefs.hidden, prefs.rate, prefs.talk, signal, pinned, dragging, worldPhase, speak])
+      }, [plan, timer, prefs.hidden, prefs.rate, prefs.talk, prefs.pet, signal, pinned, dragging, worldPhase, speak, rosterSeq])
 
       // 窗口变小的时候别把鱼留在屏幕外。
       React.useEffect(() => {
@@ -1301,24 +1513,11 @@ window.__ModuleLoader__.load({
       const activeAssets = petAssets(prefs.pet)
       const visible =
         keyword === '' ? activeAssets : activeAssets.filter((item) => item.n.toLowerCase().includes(keyword))
-
-      /** 换一只宠物：纯前端切换，立即生效（清掉状态机的临时状态，让它用新宠物的池子）。 */
-      const switchPet = (pet) => {
-        if (pet.id === prefs.pet) return
-        const machine = machineRef.current
-        machine.activity = null
-        machine.activityUntil = 0
-        machine.activitySay = null
-        machine.runAsset = null
-        machine.runPhase = null
-        machine.holdAsset = null
-        machine.dropAsset = null
-        machine.dropUntil = 0
-        setPinned(null)
-        update({ pet: pet.id })
-        setSignal((n) => n + 1)
-        speak('switchPet', { force: true, vars: { x: pet.label } })
-      }
+      // res/ 里还没导入的压缩包（只有 Host 半边给了运行时花名册才知道）。
+      const resArchives = catalog.res && Array.isArray(catalog.res.archives) ? catalog.res.archives : []
+      const pendingArchives = catalog.res && Array.isArray(catalog.res.pending) ? catalog.res.pending : []
+      const readyArchives = resArchives.filter((item) => item.pet !== '')
+      const noAssets = catalog.assets.length === 0
 
       // 干活时常驻的状态条：干活中/等你回答，其余时间只有说话时才出现。
       const stickyKey = worldPhase === 'running' ? 'working' : worldPhase === 'attention' ? 'waiting' : null
@@ -1333,7 +1532,17 @@ window.__ModuleLoader__.load({
       const bubbleBorderColor = bubbleTint
         ? `color-mix(in srgb, ${bubbleTint} 60%, var(--dsw-alias-border-l1, rgba(127,127,127,0.35)))`
         : 'var(--dsw-alias-border-l1, rgba(127,127,127,0.35))'
-      // 连续 3 次图片加载失败 → 占用气泡位置显示一条说明（可以关掉）。
+      // 连续 3 次图片加载失败 → 占用气泡位置显示一条说明（带重扫/导入按钮，可以关掉）。
+      const smallButtonStyle = {
+        font: 'inherit',
+        fontSize: 10,
+        padding: '1px 5px',
+        borderRadius: 6,
+        border: '1px solid var(--dsw-alias-border-l1, rgba(127,127,127,0.35))',
+        background: 'transparent',
+        color: 'inherit',
+        cursor: 'pointer',
+      }
       const noticeNode =
         noticeHidden || imageFailures < 3
           ? null
@@ -1341,27 +1550,38 @@ window.__ModuleLoader__.load({
               'div',
               { style: { ...NOTICE_STYLE, right: clamp(prefs.x, 8, Math.max(8, window.innerWidth - 260)), bottom: prefs.y + size + 6 } },
               [
-                h('span', { key: 'text' }, `🐟 ${t('loadFail')} —— ${t('buildHint')}`),
-                h(
-                  'button',
-                  {
-                    key: 'close',
-                    type: 'button',
-                    onClick: () => setNoticeHidden(true),
-                    style: {
-                      marginLeft: 6,
-                      font: 'inherit',
-                      fontSize: 10,
-                      padding: '0 4px',
-                      borderRadius: 6,
-                      border: '1px solid var(--dsw-alias-border-l1, rgba(127,127,127,0.35))',
-                      background: 'transparent',
-                      color: 'inherit',
-                      cursor: 'pointer',
+                h('div', { key: 'text' }, `🐟 ${t('loadFail')} —— ${t('buildHint')}`),
+                h('div', { key: 'row', style: { marginTop: 4, display: 'flex', gap: 4, flexWrap: 'wrap' } }, [
+                  h(
+                    'button',
+                    {
+                      key: 'rescan',
+                      type: 'button',
+                      disabled: rosterState === 'loading',
+                      onClick: () => {
+                        setImageFailures(0)
+                        void refreshRoster({ force: true, loud: true })
+                      },
+                      style: smallButtonStyle,
                     },
-                  },
-                  '✕',
-                ),
+                    `⟳ ${t('rescan')}`,
+                  ),
+                  h(
+                    'button',
+                    { key: 'import', type: 'button', disabled: importing, onClick: () => void importFromRes(false), style: smallButtonStyle },
+                    importing ? t('importing') : `${t('import')} ${t('archive')}`,
+                  ),
+                  h(
+                    'button',
+                    {
+                      key: 'close',
+                      type: 'button',
+                      onClick: () => setNoticeHidden(true),
+                      style: smallButtonStyle,
+                    },
+                    '✕',
+                  ),
+                ]),
               ],
             )
       const bubbleNode =
@@ -1516,38 +1736,99 @@ window.__ModuleLoader__.load({
             activity !== null ? activity : machineState === 'poke' ? 'pokeState' : machineState,
           )}`,
         ),
-        PETS.length > 1
-          ? h(
-              'div',
-              { style: { display: 'flex', alignItems: 'center', gap: 6, fontSize: 11, flex: '0 0 auto' } },
-              h('span', { style: { whiteSpace: 'nowrap' } }, t('pets')),
+        // 宠物行常驻：只有一只的时候也要让用户看见「在哪加新宠物」。
+        h(
+          'div',
+          { style: { display: 'flex', alignItems: 'center', gap: 6, fontSize: 11, flex: '0 0 auto', flexWrap: 'wrap' } },
+          h('span', { style: { whiteSpace: 'nowrap' } }, t('petSwap')),
+          h(
+            'div',
+            { style: { display: 'flex', flexWrap: 'wrap', gap: 4 } },
+            catalog.pets.map((pet) =>
               h(
-                'div',
-                { style: { display: 'flex', flexWrap: 'wrap', gap: 4 } },
-                PETS.map((pet) =>
-                  h(
-                    'button',
-                    {
-                      key: pet.id,
-                      type: 'button',
-                      title: `${pet.id} · ${pet.count} 个动画`,
-                      onClick: () => switchPet(pet),
-                      style: {
-                        ...buttonStyle,
-                        borderColor:
-                          prefs.pet === pet.id
-                            ? 'var(--dsw-alias-brand-primary, rgba(80,140,255,0.9))'
-                            : 'var(--dsw-alias-border-l1, rgba(127,127,127,0.35))',
-                        color: prefs.pet === pet.id ? 'var(--dsw-alias-brand-primary, inherit)' : 'inherit',
-                        fontWeight: prefs.pet === pet.id ? 600 : 400,
-                      },
-                    },
-                    pet.label,
-                  ),
-                ),
+                'button',
+                {
+                  key: pet.id,
+                  type: 'button',
+                  title: `${pet.id} · ${pet.count} ${t('total')}`,
+                  onClick: () => switchPet(pet.id),
+                  style: {
+                    ...buttonStyle,
+                    borderColor:
+                      prefs.pet === pet.id
+                        ? 'var(--dsw-alias-brand-primary, rgba(80,140,255,0.9))'
+                        : 'var(--dsw-alias-border-l1, rgba(127,127,127,0.35))',
+                    color: prefs.pet === pet.id ? 'var(--dsw-alias-brand-primary, inherit)' : 'inherit',
+                    fontWeight: prefs.pet === pet.id ? 600 : 400,
+                  },
+                },
+                pet.label,
               ),
-            )
-          : null,
+            ),
+            noAssets
+              ? h(
+                  'span',
+                  { style: { color: 'var(--dsw-alias-label-secondary, inherit)' } },
+                  t('noAssets'),
+                )
+              : null,
+          ),
+          h(
+            'button',
+            {
+              type: 'button',
+              title: t('rescanTitle'),
+              disabled: rosterState === 'loading',
+              onClick: () => void refreshRoster({ force: true, loud: true }),
+              style: { ...buttonStyle, opacity: rosterState === 'loading' ? 0.55 : 1 },
+            },
+            `⟳ ${t('rescan')}`,
+          ),
+          h(
+            'button',
+            {
+              type: 'button',
+              title: t('importTitle'),
+              disabled: importing,
+              onClick: () => void importFromRes(false),
+              style: {
+                ...buttonStyle,
+                opacity: importing ? 0.55 : 1,
+                borderColor:
+                  pendingArchives.length > 0
+                    ? 'var(--dsw-alias-brand-primary, rgba(80,140,255,0.9))'
+                    : 'var(--dsw-alias-border-l1, rgba(127,127,127,0.35))',
+                color: pendingArchives.length > 0 ? 'var(--dsw-alias-brand-primary, inherit)' : 'inherit',
+                fontWeight: pendingArchives.length > 0 ? 600 : 400,
+              },
+            },
+            importing
+              ? t('importing')
+              : `${t('import')} ${t('archive')}${pendingArchives.length > 0 ? ` (${pendingArchives.length})` : ''}`,
+          ),
+          readyArchives.length > 0 && pendingArchives.length === 0
+            ? h(
+                'button',
+                {
+                  type: 'button',
+                  title: t('importForceTitle'),
+                  disabled: importing,
+                  onClick: () => void importFromRes(true),
+                  style: { ...buttonStyle, opacity: importing ? 0.55 : 1 },
+                },
+                t('importForce'),
+              )
+            : null,
+        ),
+        h(
+          'div',
+          { style: { fontSize: 10, color: 'var(--dsw-alias-label-secondary, inherit)', flex: '0 0 auto' } },
+          rosterNote !== null
+            ? rosterNote
+            : `${t('petHint')}（${t('roster')}：${
+                catalog.source === 'runtime' ? t('rosterRuntime') : t('rosterBuilt')
+              }${catalog.pets.length > 0 ? ` · ${catalog.pets.length} ${t('total')}` : ''}）`,
+        ),
         showDiag
           ? h(
               'div',
@@ -1556,7 +1837,9 @@ window.__ModuleLoader__.load({
                 'sWait',
               )}${world.waiting} · ${t('sDone')}${world.finished} · ${t('pets')}${petLabel(prefs.pet)}(${
                 activeAssets.length
-              }) · ${formatTokens(
+              }) · ${t('roster')}${catalog.source === 'runtime' ? t('rosterRuntime') : t('rosterBuilt')}/${rosterState}${
+                catalog.scanMs > 0 ? ` ${catalog.scanMs}ms` : ''
+              } · ${t('archive')}${readyArchives.length}(-${pendingArchives.length}) · dict:${localeInfo()} · ${formatTokens(
                 tokenTotal,
               )} ${t('sTokens')} · ${t('sEvents')}${binding ? eventCountRef.current : '×'}`,
             )
@@ -1734,43 +2017,132 @@ window.__ModuleLoader__.load({
         ),
       )
 
+      // 一个动画都没有（新克隆还没导入素材 / 素材被删了）：给一张能自救的卡片。
+      // 面板本来要靠点宠物才打得开，这时候必须让按钮直接出现在卡片上。
+      if (noAssets) {
+        return h(
+          'div',
+          { style: { ...NOTICE_STYLE, display: 'flex', flexDirection: 'column', gap: 6, maxWidth: 280 } },
+          h('div', { key: 'title', style: { fontWeight: 600 } }, `🐟 ${t('noAssets')}`),
+          h('div', { key: 'hint' }, t('noAssetsHint')),
+          h('div', { key: 'row', style: { display: 'flex', gap: 6, flexWrap: 'wrap' } }, [
+            h(
+              'button',
+              {
+                key: 'import',
+                type: 'button',
+                disabled: importing,
+                onClick: () => void importFromRes(false),
+                style: { ...buttonStyle, opacity: importing ? 0.55 : 1 },
+              },
+              importing ? t('importing') : `${t('import')} ${t('archive')}`,
+            ),
+            h(
+              'button',
+              { key: 'rescan', type: 'button', disabled: rosterState === 'loading', onClick: () => void refreshRoster({ force: true, loud: true }), style: { ...buttonStyle, opacity: rosterState === 'loading' ? 0.55 : 1 } },
+              `⟳ ${t('rescan')}`,
+            ),
+          ]),
+          rosterNote !== null
+            ? h('div', { key: 'note', style: { fontSize: 10, color: 'var(--dsw-alias-label-secondary, inherit)' } }, rosterNote)
+            : null,
+        )
+      }
+
       return h(React.Fragment, null, pet, bubbleNode, panelOpen ? panel : null)
     }
 
     return {
       inject: ['slots'],
       apply(ctx) {
-        const locale = ctx.get('locale')
-        if (locale) {
-          ctx.effect(() => {
-            // 按「实际注册了哪些语言」来登记词典：写死 zh-CN/en 的话，
-            // 界面语言是 zh-Hans 之类时查不到，就会一路回退成英文。
-            const ids = new Set(['zh-CN', 'zh-Hans', 'zh', 'en'])
+        /**
+         * 词典。
+         *
+         * 客户端插件是 `immediately` 挂载的，apply() 执行这一刻 `ctx.get('locale')`
+         * 很可能还没准备好 —— 老写法「拿一次，拿不到就一辈子回退成原始 key」的症状
+         * 就是面板上写着 petSwap / size / poke 这种原始 key（实测踩过）。
+         * 所以这里不再在 apply 时定死，而是：
+         *   - 登记与绑定都做成懒的：t() 每次被调用时再看一眼 service 在不在；
+         *   - 同时用 locale/change 事件 + 两次短延时重试，兜住「服务晚到、之后又不重渲染」的情况。
+         * bind() 返回的函数每次调用都现读语言与词典，所以绑一次之后切语言照样即时生效。
+         */
+        const localeState = { service: null, bound: null, registered: false, ids: new Set() }
+        const registeredIds = new Set()
+        const disposeRegistrations = []
+
+        /** 服务在就（幂等地）登记词典；返回可用的服务本身。 */
+        const ensureLocale = () => {
+          const service = localeState.service || ctx.get('locale')
+          if (!service || typeof service.bind !== 'function') return null
+          localeState.service = service
+          if (!localeState.registered) {
+            localeState.registered = true
+            // 写死 zh-CN/en 不够：真实 id 可能是 zh-Hans / zh 之类，一变就查不到。
+            for (const id of ['zh-CN', 'zh-Hans', 'zh', 'en']) localeState.ids.add(id)
             try {
-              const snapshot = locale.getLocale()
+              const snapshot = typeof service.getLocale === 'function' ? service.getLocale() : null
               if (snapshot && Array.isArray(snapshot.locales)) {
                 for (const definition of snapshot.locales) {
-                  if (definition && typeof definition.id === 'string') ids.add(definition.id)
+                  if (definition && typeof definition.id === 'string') localeState.ids.add(definition.id)
                 }
               }
             } catch {
               /* 读不到语言表就用上面几个兜底 id */
             }
-            const disposers = []
-            for (const id of ids) {
-              const dict = /^zh/i.test(id) ? DICT['zh-CN'] : DICT.en
+            for (const id of localeState.ids) {
+              if (registeredIds.has(id)) continue
               try {
-                disposers.push(locale.register('fish-pet', id, dict))
+                const dispose = service.register('fish-pet', id, /^zh/i.test(id) ? DICT['zh-CN'] : DICT.en)
+                registeredIds.add(id)
+                if (typeof dispose === 'function') disposeRegistrations.push(dispose)
               } catch (error) {
                 console.error(`dsh-fish-pet: locale dict for ${id} failed`, error)
               }
             }
-            return () => {
-              for (const dispose of disposers) dispose()
-            }
-          })
+          }
+          return service
         }
-        const t = locale ? locale.bind('fish-pet') : (key) => key
+
+        /** 稳定的翻译入口：服务晚到也能补上；绑一次之后不再重复绑。 */
+        const t = (key, vars) => {
+          if (localeState.bound === null) {
+            const service = ensureLocale()
+            if (service === null) return key
+            try {
+              localeState.bound = service.bind('fish-pet')
+            } catch (error) {
+              console.error('dsh-fish-pet: locale bind failed', error)
+              return key
+            }
+          }
+          return localeState.bound(key, vars)
+        }
+
+        // 挂载时先登记一次；服务晚到就靠事件 + 两次短延时补上。
+        ctx.effect(() => {
+          ensureLocale()
+          let off = null
+          try {
+            if (typeof ctx.on === 'function') off = ctx.on('locale/change', () => ensureLocale())
+          } catch {
+            /* 没有这个事件也没关系，下面还有延时兜底 */
+          }
+          const timers = [300, 1500].map((ms) => window.setTimeout(() => ensureLocale(), ms))
+          return () => {
+            if (typeof off === 'function') off()
+            for (const id of timers) window.clearTimeout(id)
+            for (const dispose of disposeRegistrations.splice(0)) {
+              try {
+                dispose()
+              } catch {
+                /* 已经移除过 */
+              }
+            }
+            localeState.registered = false
+            localeState.bound = null
+          }
+        })
+
         const timer = ctx.get('timer')
 
         // 被拎住/放下的那点表现力，用一次性的样式表；插件停掉时自动移除。
@@ -1793,13 +2165,28 @@ window.__ModuleLoader__.load({
 
         // 台词表现读当前语言，切换语言立刻生效。
         const activeLocale = () => {
-          if (!locale) return 'zh'
+          const service = ensureLocale()
+          if (!service) return 'zh'
           try {
-            const snapshot = locale.getLocale()
+            const snapshot = typeof service.getLocale === 'function' ? service.getLocale() : null
             return snapshot && typeof snapshot.active === 'string' ? snapshot.active : 'zh'
           } catch {
             return 'zh'
           }
+        }
+
+        /** 诊断行里显示词典状态：`none` = 服务还没来，`unbound` = 没绑上，`nodict` = 没登记上。 */
+        const localeInfo = () => {
+          const service = ctx.get('locale')
+          if (!service) return 'none'
+          let active = '?'
+          try {
+            const snapshot = service.getLocale()
+            active = snapshot && typeof snapshot.active === 'string' ? snapshot.active : '?'
+          } catch {
+            active = 'err'
+          }
+          return `${active}${localeState.registered ? '' : '·nodict'}${localeState.bound === null ? '·unbound' : ''}`
         }
 
         // 会话事件流（干活播报用）：客户端会话控制器给的 binding.eventSource。
@@ -1808,7 +2195,7 @@ window.__ModuleLoader__.load({
           h(
             PetBoundary,
             null,
-            h(FishPet, { ...slotProps, timer, t, statusStore, activeLocale, sessionsService }),
+            h(FishPet, { ...slotProps, timer, t, statusStore, activeLocale, localeInfo, sessionsService }),
           )
         ctx.effect(() =>
           ctx.slots.inject('shell.overlay', () =>

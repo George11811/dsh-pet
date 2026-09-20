@@ -2,13 +2,16 @@
 #
 # 素材分两处：
 #   res/             素材库：桌宠压缩包（.7z / .zip）丢这里
-#   assets/<桌宠>/    运行时目录：生成脚本从 res/ 解压出来，Host 半边递归提供给浏览器
+#   assets/<桌宠>/    运行时目录：res/ 里的包解压出来的素材，Host 半边递归提供给浏览器
 #
-# 「解压 + 生成客户端数据」是**构建步骤**，由
-#   node tools/build-client.mjs
-# 完成（--force 强制重解、--strict 名字对不上就失败）。重启 dsh 本身不会构建 ——
-# 除非把下面的 buildOnStart 设为 true：那样 Host 启动时若发现 assets/ 是空的，
-# 会在后台自动跑一次生成脚本（不阻塞启动）。
+# 两件事分开看：
+#   1. 扫描 assets/ → 宠物/动画/池子（花名册）：**运行时按需做**（GET /fish-pet/__roster，
+#      结果在内存里缓存 5 秒 + 磁盘上缓存每个 GIF 的一轮时长）。所以往 assets/ 丢一个目录、
+#      或者删掉一只宠物，面板里点「重扫」就生效 —— 不用重启、不用重新构建。
+#   2. 解压 res/ 的压缩包：面板上的「导入」按钮（POST /fish-pet/__import）会做；
+#      命令行等价物是 node tools/build-client.mjs，它额外把数据写进 lib/client.js 当离线兜底。
+# 重启 dsh 本身不解压 —— 除非把下面的 buildOnStart 设为 true：那样 Host 启动时若发现
+# assets/ 是空的，会在后台自动跑一次生成脚本（不阻塞启动）。
 - insert:
     - id: fish-pet
       name: dsh-fish-pet
