@@ -4,7 +4,7 @@
 #          忽略它 = 忽略"解压结果"；res/ 里的包才是源。
 #          重建方式：node tools/build-client.mjs
 #          （config.buildOnStart = true 时，Host 启动发现 assets/ 为空也会自动重建）
-/assets/
+# /assets/
 
 # lib/client.js **不要**忽略：它是客户端半边的实际入口（package.json 的 exports["./client"]），
 # 忽略掉的话全新克隆上来客户端模块加载失败。隔壁 refs-shelf 和 dsh 自带的包也一样提交 lib/。
