@@ -1,5 +1,7 @@
 # 蓝色大肥鱼桌宠（dsh-fish-pet）
 
+资源出处：B站大佬：[赤风RED](https://www.bilibili.com/video/BV1V88G6TEvg/?vd_source=1f98ab6b59946b7e7863558a702e9c20)
+
 把素材文件夹里的 157 张 GIF 做成一个悬浮在 DSH Web 界面上的桌宠。
 它是**装进当前 profile 的插件**（bundle），所以这个 profile 下的每个会话都能看到它。
 
