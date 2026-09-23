@@ -1,7 +1,22 @@
 # 蓝色大肥鱼桌宠（dsh-fish-pet）
 
-把素材文件夹里的 157 张 GIF 做成一个悬浮在 DSH Web 界面上的桌宠。
+鲸鱼娘表情包资源：[B站赤风RED](https://www.bilibili.com/video/BV1V88G6TEvg/?vd_source=1f98ab6b59946b7e7863558a702e9c20)
+
+把素材文件夹里的 GIF 做成一个悬浮在 DSH Web 界面上的桌宠。
 它是**装进当前 profile 的插件**（bundle），所以这个 profile 下的每个会话都能看到它。
+
+## 安装
+
+### 1. 用dsh插件管理器安装这个插件
+### 2. 放素材（不放就是一只空宠物）
+
+`res/` 是素材库（默认 `<包>/res`，被 `.gitignore` 忽略，仓库里没有）：把桌宠压缩包丢进去
+→ 刷新页面 → 面板点 **「导入 压缩包」**；不想开页面就 `node tools/build-client.mjs`。
+
+- 压缩包：`.zip / .7z / .rar / .tar / .gz / .tgz`；**不要求包内有 `assets/` 目录**
+  —— 自套的目录链会被拍平，规则见「加 / 换宠物」那一节
+- 环境里没装 7-Zip 时只剩 Windows 自带的 `tar`，`.7z / .rar` 不一定解得开 → **优先打包成 `.zip`**
+- 包名就是宠物目录名：`fat-fish.zip` → `assets/fat-fish/`，面板「换一只」那行显示的就是它
 
 ## 状态机
 
@@ -256,7 +271,8 @@ node tools/client-smoke.mjs   # 18 项：用最小 React 替身渲染客户端�
   `assets/<每只宠物>/*.gif` 全都能提供 —— 多宠物切换的正常状态，当前就是这个。
 - `resDir`：素材库目录，默认 `<包>/res`。
 - `cacheSeconds`：浏览器缓存秒数。
-- `buildOnStart`：`assets/` 空时是否在启动时自动构建一次（默认 `false`，见上）。
+- `buildOnStart`：`assets/` 空且 `res/` 里有压缩包时，是否在启动时后台自动解压一次
+  （配置项本身的默认值是 `false`；本包在 [cordis.patch.yml](cordis.patch.yml) 里设成了 `true`，见上）。
 
 ## 改完什么时候生效
 
@@ -303,7 +319,7 @@ resArchives, pendingImports, buildOnStart, pets, roster, cacheSeconds, stats }`�
 | `assets/` | ❌ | 构建产物：`res/` 的压缩包解压出来的（约 930 MB，含 `.fish-pet-loops.json` 缓存），面板「导入」或 `node tools/build-client.mjs` 随时重建 |
 | `res/` | ⚠️ 默认提交 | 它是**源素材**，但单个包可能很大（`fat-fish.7z` 428 MB），而 GitHub 单文件上限 100 MB —— 要推远端就取消 `.gitignore` 里 `/res/` 那行（或改用 Git LFS） |
 
-全新克隆后的流程（两种都行）：
+全新克隆后的流程（先按开头「安装」把包装进 profile，再二选一放素材）：
 
 - 面板派：把桌宠包放进 `res/` → 刷新页面 → 面板点「导入」；
 - 命令派：`node tools/build-client.mjs`（或让 `config.buildOnStart: true` 在 dsh 启动时自动做）。
@@ -314,7 +330,9 @@ resArchives, pendingImports, buildOnStart, pets, roster, cacheSeconds, stats }`�
 ## 卸载
 
 ```powershell
-dsh plugin remove dsh-fish-pet
+dsh plugin --profile web remove dsh-fish-pet   # profile 名换成安装时用的那个
 ```
 
 或在 GUI 的插件设置里把 `dsh-fish-pet` 这个 bundle 关掉。
+两者的关系：**关掉**只是停用（依赖还在，随时开回来），**remove** 才是把依赖从 profile 里删掉
+（素材目录 `assets/`、`res/` 留在原处不动）。
