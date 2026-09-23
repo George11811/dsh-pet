@@ -188,6 +188,23 @@ async function loadClient(file, options) {
     },
   }
 
+  // 假 remote：把 user-questions/request 的 handler 抓出来，测试就能直接喂一条假 request。
+  // 真身是 ctx.remote.$on(event, function (request, next) {...})，this = agent scope。
+  const handlers = new Map()
+  const remote = {
+    $on(event, listener) {
+      const list = handlers.get(event) || []
+      list.push(listener)
+      handlers.set(event, list)
+      return () => {
+        handlers.set(
+          event,
+          (handlers.get(event) || []).filter((item) => item !== listener),
+        )
+      }
+    },
+  }
+
   let Root = null
   // localeGate：模拟真实挂载顺序 —— 客户端插件是 immediately 挂的，
   // ctx.get('locale') 前 N 次可能返回 undefined，晚一拍才拿到服务。
@@ -200,6 +217,11 @@ async function loadClient(file, options) {
         if (gate !== null && localeSeen <= gate.n) return undefined
         return locale
       }
+      if (name === 'remote') return opts.remote === false ? undefined : remote
+      if (name === 'sessions') return opts.sessions
+      if (name === 'uiSession') return opts.uiSession
+      if (name === 'conversation') return opts.conversation
+      if (name === 'uiWorkspace') return opts.uiWorkspace
       return undefined
     },
     effect(callback) {
@@ -218,7 +240,7 @@ async function loadClient(file, options) {
   }
   module.apply(ctx)
   if (Root === null) throw new Error('客户端没有注册 shell.overlay 组件')
-  return { Root, missing, dicts }
+  return { Root, missing, dicts, handlers }
 }
 
 const cases = []
@@ -458,6 +480,421 @@ cases.push([
   lateDicts.size > 0,
   `dicts=${[...lateDicts.keys()].join(',')}`,
 ])
+
+/**
+ * 假官方卡片（dsh-client-ui-user-questions 的骨架）：
+ *   收到一条 request 就建一个 pending 互动、同步登记进 uiSession.sessionStatus；
+ *   answer() 落答案、随后把登记撤掉（真实实现是在自己的 finally 里 remove()）。
+ * 有了它才测得出「宠物替官方答完，会话里那张卡跟着消失」这件事。
+ */
+function createFakeOfficial() {
+  const status = new Map()
+  const answered = []
+  const asked = []
+  let focusCalls = 0
+  let seq = 0
+  const ask = (questions, sessionId) => {
+    seq += 1
+    let resolveResult
+    const record = {
+      sessionId,
+      key: `question:${seq}`,
+      kind: 'question',
+      questions,
+      answered: false,
+      payload: null,
+      result: new Promise((resolve) => {
+        resolveResult = resolve
+      }),
+    }
+    record.answer = (payload) => {
+      if (record.answered) return Promise.reject(new Error('pending question is already settled'))
+      record.answered = true
+      record.payload = payload
+      answered.push(payload)
+      resolveResult(payload)
+      return Promise.resolve().then(() => {
+        if (status.get(sessionId)?.pendingInteraction === record) status.delete(sessionId)
+      })
+    }
+    status.set(sessionId, { pendingInteraction: record })
+    asked.push(record)
+    return record
+  }
+  return {
+    status,
+    answered,
+    asked,
+    ask,
+    uiSession: { sessionStatus: { getSnapshot: () => status, subscribe: () => () => {} } },
+    conversation: { input: { for: () => ({ focus: () => { focusCalls += 1 } }) } },
+    focusCalls: () => focusCalls,
+  }
+}
+
+/** 等一个 promise，最多等 ms（防测试卡死；超时给个哨兵，断言会 FAIL 而不是挂住）。 */
+const TIMEOUT = Symbol('settle-timeout')
+const settleWithin = (promise, ms) =>
+  Promise.race([promise, new Promise((resolve) => setTimeout(() => resolve(TIMEOUT), ms))])
+
+// ── 6. 待回答问题（方案 B）：宠物这边渲染同一题，点一下替官方提交 ──────────────
+// 假 remote.$on 抓住 handler、假 uiSession 提供官方那条 pending 互动：
+//   ① 选项渲染出来了；② 点一下把答案交给官方（载荷正确）；
+//   ③ next() 确实被调用；④ 多题 / plan-review 整个让给官方；
+//   ⑤ 宠物答完，会话里那张官方卡跟着消失（这就是之前漏掉的那一步）；
+//   ⑥ 收起只收宠物这边，官方那一题不动；⑦ 自己填 → 光标进官方卡片的 textarea，送到了才收起卡片
+//      （在别的会话里会先切到拥有这道题的那个会话）；
+//   ⑧ 宠物藏起来时不渲染也不抢答；⑨ 用户在官方那边答了，宠物卡也一起收。
+const fake = createFakeOfficial()
+const sessions = { scopeOf: () => 'sess-1' }
+const { Root: questionRoot, handlers } = await loadClient(path.join(packageRoot, 'lib', 'client.js'), {
+  tag: 'questions',
+  sessions,
+  uiSession: fake.uiSession,
+  conversation: fake.conversation,
+})
+const questionHandler = (handlers.get('user-questions/request') || [])[0]
+const questionLabels = [
+  '待回答问题渲染出选项',
+  'next() 确实被调用（官方路径保住）',
+  '点选项 = 替官方提交答案（载荷正确）',
+  '宠物答完，会话里那张官方卡跟着消失',
+  '多题 / plan-review 直接委派给官方',
+  '收起只收宠物这边（官方那一题不动）',
+  '自己填 → 只收宠物卡 + 聚焦会话输入框',
+  '宠物藏起来时不渲染也不抢答',
+  '用户在官方那边答了，宠物卡也一起收',
+  '自己填 → 光标落到官方卡片的输入框',
+  '别的会话里自己填 → 先切会话再送光标',
+]
+if (questionHandler === undefined) {
+  for (const label of questionLabels) cases.push([label, false, '没有注册 user-questions/request handler'])
+} else {
+  draw(questionRoot)
+  let nextCount = 0
+  /** 调一次 handler：假 next() 按官方那样建一条 pending 互动，并把它的 result 交回去。 */
+  const call = (request) => {
+    let record = null
+    const result = questionHandler.call({}, request, () => {
+      nextCount += 1
+      record = fake.ask(request.questions, 'sess-1')
+      return record.result
+    })
+    return { result, record: () => record }
+  }
+
+  // ① 单题 + options：卡片和选项都要出来
+  const singleRequest = {
+    questions: [
+      {
+        id: 'q-single',
+        header: '确认一下',
+        question: '先做哪一半？',
+        options: [{ label: '选项甲' }, { label: '选项乙', description: '慢一点但更稳' }],
+      },
+    ],
+  }
+  const single = call(singleRequest)
+  let questionTree = draw(questionRoot)
+  const questionText = textOf(questionTree)
+  cases.push([
+    '待回答问题渲染出选项',
+    questionText.includes('先做哪一半') && questionText.includes('选项甲') && questionText.includes('选项乙'),
+    questionText.slice(0, 60),
+  ])
+
+  // ③ next() 必须被调用：官方卡片那条路没被顶掉
+  cases.push(['next() 确实被调用（官方路径保住）', nextCount === 1, `next=${nextCount}`])
+
+  // ② 点一下 = 替官方 answer()，载荷走官方那条路回给 Host
+  const optionButton = buttonsWithText(questionTree, '选项甲').find((node) => typeof node.props.onClick === 'function')
+  const expectedPayload = { answers: [{ id: 'q-single', selected: ['选项甲'] }] }
+  if (optionButton === undefined) {
+    cases.push(['点选项 = 替官方提交答案（载荷正确）', false, '找不到「选项甲」按钮'])
+    cases.push(['宠物答完，会话里那张官方卡跟着消失', false, '没点成'])
+  } else {
+    optionButton.props.onClick()
+    const payload = await settleWithin(single.result, 300)
+    cases.push([
+      '点选项 = 替官方提交答案（载荷正确）',
+      payload !== TIMEOUT && JSON.stringify(payload) === JSON.stringify(expectedPayload) &&
+        JSON.stringify(fake.answered[0]) === JSON.stringify(expectedPayload) &&
+        single.record().answered === true,
+      payload === TIMEOUT ? '超时：答案没回到官方' : JSON.stringify(payload),
+    ])
+    // ⑤ 关键回归：官方那张卡必须撤掉（之前用完赛跑，官方 pending 一直挂着）
+    await flush()
+    const leftover = textOf(draw(questionRoot))
+    cases.push([
+      '宠物答完，会话里那张官方卡跟着消失',
+      fake.status.has('sess-1') === false && !leftover.includes('先做哪一半'),
+      `pending=${fake.status.size} 残留宠物卡=${leftover.includes('先做哪一半')}`,
+    ])
+  }
+
+  // ④ 多题 / plan-review：整个让给官方，宠物这边不渲染也不抢答
+  const officialAnswer = { answers: [{ id: 'q-a', selected: ['官方那边'] }] }
+  const twoQuestions = {
+    questions: [
+      { id: 'q-a', question: '第一题', options: [{ label: '甲' }] },
+      { id: 'q-b', question: '第二题', options: [{ label: '乙' }] },
+    ],
+  }
+  const planReview = {
+    questions: [
+      {
+        id: 'q-plan',
+        question: '批准这个计划？',
+        detail: '# 计划',
+        intent: { kind: 'plan-review', approve: '批准' },
+        options: [{ label: '批准' }, { label: '拒绝' }],
+      },
+    ],
+  }
+  const beforeDelegated = nextCount
+  let twoRecord = null
+  const twoResult = questionHandler.call({}, twoQuestions, () => {
+    nextCount += 1
+    twoRecord = fake.ask(twoQuestions.questions, 'sess-1')
+    return twoRecord.result
+  })
+  const twoText = textOf(draw(questionRoot))
+  twoRecord.answer(officialAnswer)
+  const twoRes = await settleWithin(twoResult, 300)
+  let planRecord = null
+  const planResult = questionHandler.call({}, planReview, () => {
+    nextCount += 1
+    planRecord = fake.ask(planReview.questions, 'sess-1')
+    return planRecord.result
+  })
+  const planText = textOf(draw(questionRoot))
+  planRecord.answer(officialAnswer)
+  const planRes = await settleWithin(planResult, 300)
+  cases.push([
+    '多题 / plan-review 直接委派给官方',
+    nextCount === beforeDelegated + 2 &&
+      JSON.stringify(twoRes) === JSON.stringify(officialAnswer) &&
+      JSON.stringify(planRes) === JSON.stringify(officialAnswer) &&
+      !twoText.includes('第二题') &&
+      !planText.includes('批准这个计划'),
+    `next=${nextCount - beforeDelegated} 渲染多题=${twoText.includes('第二题')} 渲染 plan=${planText.includes('批准这个计划')}`,
+  ])
+
+  // ⑨ 反方向：用户点了官方那边，宠物这张卡也要跟着收
+  const bothRequest = {
+    questions: [{ id: 'q-both', question: '两边同时开着？', options: [{ label: '甲' }] }],
+  }
+  let bothRecord = null
+  const bothResult = questionHandler.call({}, bothRequest, () => {
+    bothRecord = fake.ask(bothRequest.questions, 'sess-1')
+    return bothRecord.result
+  })
+  const bothText = textOf(draw(questionRoot))
+  bothRecord.answer({ answers: [{ id: 'q-both', selected: ['甲'] }] })
+  await flush()
+  const afterBoth = textOf(draw(questionRoot))
+  cases.push([
+    '用户在官方那边答了，宠物卡也一起收',
+    bothText.includes('两边同时开着') && !afterBoth.includes('两边同时开着'),
+    `宠物卡在=${bothText.includes('两边同时开着')} 残留=${afterBoth.includes('两边同时开着')}`,
+  ])
+  await settleWithin(bothResult, 300)
+
+  // ⑥ 收起：只收宠物这张卡，官方那一题继续挂着等用户
+  const collapseRequest = {
+    questions: [{ id: 'q-collapse', question: '这题先收起来？', options: [{ label: '甲' }, { label: '乙' }] }],
+  }
+  let collapseRecord = null
+  const collapseResult = questionHandler.call({}, collapseRequest, () => {
+    collapseRecord = fake.ask(collapseRequest.questions, 'sess-1')
+    return collapseRecord.result
+  })
+  const collapseButton = buttonsWithText(draw(questionRoot), '收起').find(
+    (node) => typeof node.props.onClick === 'function',
+  )
+  if (collapseButton === undefined) {
+    cases.push(['收起只收宠物这边（官方那一题不动）', false, '找不到「收起」按钮'])
+  } else {
+    collapseButton.props.onClick()
+    const afterCollapse = textOf(draw(questionRoot))
+    cases.push([
+      '收起只收宠物这边（官方那一题不动）',
+      collapseRecord.answered === false &&
+        fake.status.get('sess-1')?.pendingInteraction === collapseRecord &&
+        !afterCollapse.includes('这题先收起来'),
+      `官方已答=${collapseRecord.answered} 宠物卡残留=${afterCollapse.includes('这题先收起来')}`,
+    ])
+  }
+  collapseRecord.answer({ answers: [{ id: 'q-collapse', selected: ['甲'] }] })
+  await settleWithin(collapseResult, 300)
+
+  // ⑦ 自己填：收起宠物卡 + 把焦点交给会话输入框（不替用户答，也不撤销官方那一题）
+  const customRequest = {
+    questions: [{ id: 'q-custom', question: '要自己填的那题？', options: [{ label: '甲' }, { label: '乙' }] }],
+  }
+  let customRecord = null
+  const customResult = questionHandler.call({}, customRequest, () => {
+    customRecord = fake.ask(customRequest.questions, 'sess-1')
+    return customRecord.result
+  })
+  const focusBefore = fake.focusCalls()
+  const customButton = buttonsWithText(draw(questionRoot), '自己填').find(
+    (node) => typeof node.props.onClick === 'function',
+  )
+  if (customButton === undefined) {
+    cases.push(['自己填 → 只收宠物卡 + 聚焦会话输入框', false, '找不到「自己填」按钮'])
+  } else {
+    customButton.props.onClick()
+    const afterCustom = textOf(draw(questionRoot))
+    cases.push([
+      '自己填 → 只收宠物卡 + 聚焦会话输入框',
+      customRecord.answered === false &&
+        fake.status.get('sess-1')?.pendingInteraction === customRecord &&
+        fake.focusCalls() === focusBefore + 1 &&
+        !afterCustom.includes('要自己填的那题'),
+      `focus=${fake.focusCalls() - focusBefore} 官方已答=${customRecord.answered}`,
+    ])
+  }
+  customRecord.answer({ answers: [{ id: 'q-custom', selected: ['甲'] }] })
+  await settleWithin(customResult, 300)
+
+  // ⑦b 官方卡片在 DOM 里时：光标直接落到它那个自定义 textarea（不是会话主输入框）
+  const domRequest = {
+    questions: [{ id: 'q-dom', question: '让光标进官方输入框？', options: [{ label: '甲' }] }],
+  }
+  let domRecord = null
+  const domResult = questionHandler.call({}, domRequest, () => {
+    domRecord = fake.ask(domRequest.questions, 'sess-1')
+    return domRecord.result
+  })
+  const domButton = buttonsWithText(draw(questionRoot), '自己填').find(
+    (node) => typeof node.props.onClick === 'function',
+  )
+  if (domButton === undefined) {
+    cases.push(['自己填 → 光标落到官方卡片的输入框', false, '找不到「自己填」按钮'])
+  } else {
+    const domField = {
+      focused: 0,
+      scrolled: 0,
+      focus() {
+        this.focused += 1
+      },
+      scrollIntoView() {
+        this.scrolled += 1
+      },
+    }
+    const domCard = { querySelector: (selector) => (selector === 'textarea' ? domField : null) }
+    const domQueries = []
+    globalThis.document = {
+      querySelector: (selector) => {
+        domQueries.push(selector)
+        return selector.includes('data-question-key') ? domCard : null
+      },
+    }
+    const focusBeforeDom = fake.focusCalls()
+    domButton.props.onClick()
+    const domText = textOf(draw(questionRoot))
+    cases.push([
+      '自己填 → 光标落到官方卡片的输入框',
+      domField.focused === 1 &&
+        domField.scrolled === 1 &&
+        fake.focusCalls() === focusBeforeDom &&
+        fake.status.get('sess-1')?.pendingInteraction === domRecord &&
+        domQueries.some((selector) => selector.includes(`data-question-key="${domRecord.key}"`)) &&
+        !domText.includes('让光标进官方输入框'),
+      `textarea聚焦=${domField.focused} 兜底聚焦=${fake.focusCalls() - focusBeforeDom} 选择器=${domQueries[0] || '无'}`,
+    ])
+    delete globalThis.document
+  }
+  domRecord.answer({ answers: [{ id: 'q-dom', selected: ['甲'] }] })
+  await settleWithin(domResult, 300)
+
+  // ⑦c 在别的会话里：先切到拥有这道题的会话，再把光标送进官方输入框，最后才收起卡片
+  const switchFake = createFakeOfficial()
+  const openCalls = []
+  const { Root: switchRoot, handlers: switchHandlers } = await loadClient(path.join(packageRoot, 'lib', 'client.js'), {
+    tag: 'questions-switch',
+    sessions: { scopeOf: () => 'sess-2' },
+    uiSession: switchFake.uiSession,
+    conversation: switchFake.conversation,
+    uiWorkspace: { openSession: (id) => openCalls.push(id) },
+  })
+  const switchHandler = (switchHandlers.get('user-questions/request') || [])[0]
+  const switchRequest = {
+    questions: [{ id: 'q-switch', question: '切过去再自己填？', options: [{ label: '甲' }] }],
+  }
+  let switchRecord = null
+  const switchResult = switchHandler.call({}, switchRequest, () => {
+    switchRecord = switchFake.ask(switchRequest.questions, 'sess-2')
+    return switchRecord.result
+  })
+  const switchButton = buttonsWithText(draw(switchRoot), '自己填').find(
+    (node) => typeof node.props.onClick === 'function',
+  )
+  if (switchButton === undefined) {
+    cases.push(['别的会话里自己填 → 先切会话再送光标', false, '找不到「自己填」按钮'])
+  } else {
+    // 模拟「官方卡片此刻不在 DOM 里」；切过去之后（下面置 true）才算渲染出来
+    const switchField = {
+      focused: 0,
+      scrollIntoView() {},
+      focus() {
+        this.focused += 1
+      },
+    }
+    const switchCard = { querySelector: (selector) => (selector === 'textarea' ? switchField : null) }
+    let cardVisible = false
+    globalThis.document = { querySelector: () => (cardVisible ? switchCard : null) }
+    switchButton.props.onClick()
+    const stillThere = textOf(draw(switchRoot)).includes('切过去再自己填')
+    cardVisible = true
+    await new Promise((resolve) => setTimeout(resolve, 150))
+    const afterSwitch = textOf(draw(switchRoot))
+    cases.push([
+      '别的会话里自己填 → 先切会话再送光标',
+      openCalls.join(',') === 'sess-2' &&
+        switchField.focused === 1 &&
+        stillThere &&
+        !afterSwitch.includes('切过去再自己填') &&
+        switchFake.focusCalls() === 0,
+      `切会话=${openCalls.join(',') || '无'} textarea聚焦=${switchField.focused} 没送到时仍留着卡=${stillThere}`,
+    ])
+    delete globalThis.document
+  }
+  switchRecord.answer({ answers: [{ id: 'q-switch', selected: ['甲'] }] })
+  await settleWithin(switchResult, 300)
+
+  // ⑧ 藏起来：不渲染、不抢答，整题留给官方
+  let hiddenTree = draw(questionRoot)
+  const petBox = findAll(hiddenTree, (node) => typeof node.props.onDoubleClick === 'function')[0]
+  petBox.props.onDoubleClick({ preventDefault() {} })
+  const hideButton = buttonsWithText(draw(questionRoot), '藏起来').find(
+    (node) => typeof node.props.onClick === 'function',
+  )
+  if (hideButton === undefined) {
+    cases.push(['宠物藏起来时不渲染也不抢答', false, '找不到「藏起来」按钮'])
+  } else {
+    hideButton.props.onClick()
+    draw(questionRoot)
+    let hiddenRecord = null
+    const hiddenResult = questionHandler.call({}, {
+      questions: [{ id: 'q-hidden', question: '藏起来这题还管吗？', options: [{ label: '甲' }] }],
+    }, () => {
+      hiddenRecord = fake.ask([{ id: 'q-hidden', question: '藏起来这题还管吗？', options: [{ label: '甲' }] }], 'sess-1')
+      return hiddenRecord.result
+    })
+    const hiddenText = textOf(draw(questionRoot))
+    const hiddenOfficial = { answers: [{ id: 'q-hidden', selected: ['官方'] }] }
+    hiddenRecord.answer(hiddenOfficial)
+    const hiddenRes = await settleWithin(hiddenResult, 300)
+    cases.push([
+      '宠物藏起来时不渲染也不抢答',
+      JSON.stringify(hiddenRes) === JSON.stringify(hiddenOfficial) &&
+        !hiddenText.includes('藏起来这题还管吗'),
+      hiddenRes === TIMEOUT ? '超时' : JSON.stringify(hiddenRes),
+    ])
+  }
+}
 
 let failed = 0
 for (const [label, ok, detail] of cases) {
